@@ -290,6 +290,7 @@ function computeTimeline(session) {
   if (Number.isNaN(startMin)) metaErrors.push("开始时间无效（应为 HH:MM，00:00–23:59）");
   if (!Number.isInteger(gap) || gap < 0) metaErrors.push("换卷间隔必须是不小于 0 的整数（分钟）");
   if (!session.roomId) metaErrors.push("未选择放映室");
+  else if (!roomById(session.roomId)) metaErrors.push("所选放映室已被删除，请重新选择");
   if (!String(session.name || "").trim()) metaErrors.push("场次名称为空");
 
   const startOk = !Number.isNaN(day) && !Number.isNaN(startMin);
@@ -374,6 +375,19 @@ function allSessionViews() {
   const views = doc.sessions.map((s) => sessionView(s.id)).filter(Boolean);
   if (ui.pendingSession) views.push(ui.pendingSession);
   return views;
+}
+
+/** 放映室被哪些场次视图引用（已保存场次 / 草稿 / 未保存场次都算） */
+function roomUsage(roomId) {
+  const views = allSessionViews();
+  const referencing = views.filter((v) => v.roomId === roomId);
+  const saved = doc.sessions.filter((s) => s.roomId === roomId).length;
+  // 未保存场次（pending）或草稿里刚改到该厅、但正式数据尚未落到该厅的引用
+  const unsaved = referencing.filter((v) => {
+    const formal = sessionById(v.id);
+    return !formal || formal.roomId !== roomId;
+  }).length;
+  return { total: referencing.length, saved, unsaved };
 }
 
 /**
@@ -655,7 +669,10 @@ function renderLibrary() {
   }).join("") || `<li class="empty-line">还没有胶片卷。</li>`;
 
   els.roomList.innerHTML = doc.rooms.map((room) => {
-    const used = doc.sessions.some((s) => s.roomId === room.id);
+    const usage = roomUsage(room.id);
+    const detail = usage.total
+      ? `${usage.saved} 场已排${usage.unsaved ? ` · ${usage.unsaved} 场未保存引用` : ""}`
+      : "暂无场次使用";
     return `
       <li class="room-item">
         <div class="clip-row1">
@@ -664,7 +681,7 @@ function renderLibrary() {
             <button class="btn btn-mini danger" data-room-delete="${room.id}" type="button">删除</button>
           </span>
         </div>
-        <div class="clip-meta">${doc.sessions.filter((s) => s.roomId === room.id).length} 场已排${used ? "" : ""}</div>
+        <div class="clip-meta">${detail}</div>
       </li>`;
   }).join("") || `<li class="empty-line">还没有放映室。</li>`;
 
@@ -730,8 +747,13 @@ function renderSessionArea() {
   els.sessionName.value = sv.name;
   els.sessionDate.value = sv.date;
   els.sessionTime.value = sv.startTime;
-  els.sessionRoom.innerHTML =
-    doc.rooms.map((r) => `<option value="${r.id}"${r.id === sv.roomId ? " selected" : ""}>${esc(r.name)}</option>`).join("");
+  const roomOptions = doc.rooms.map((r) =>
+    `<option value="${r.id}"${r.id === sv.roomId ? " selected" : ""}>${esc(r.name)}</option>`);
+  // 纵深防线：当前场次引用了已不存在的放映室时，补一个失效占位，保证选择可见且可改选
+  if (sv.roomId && !doc.rooms.some((r) => r.id === sv.roomId)) {
+    roomOptions.unshift(`<option value="${esc(sv.roomId)}" selected>⚠ 放映室已删除，请改选</option>`);
+  }
+  els.sessionRoom.innerHTML = roomOptions.join("");
   els.sessionGap.value = sv.gap;
 
   renderTimelineSummary(sv);
@@ -1342,8 +1364,15 @@ els.roomList.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-room-delete]");
   if (!btn) return;
   const room = roomById(btn.dataset.roomDelete);
-  const n = doc.sessions.filter((s) => s.roomId === room.id).length;
-  if (n) { toast(`该放映室还有 ${n} 场排期，请先移除或改厅`, "error"); return; }
+  // 引用保护：已保存场次、未保存场次（pending）、已登记场次的草稿都算引用
+  const usage = roomUsage(room.id);
+  if (usage.total) {
+    const who = [];
+    if (usage.saved) who.push(`${usage.saved} 场已保存排期`);
+    if (usage.unsaved) who.push(`${usage.unsaved} 场未保存场次正在使用`);
+    toast(`放映室「${room.name}」被${who.join("、")}，请先移除场次或改厅`, "error");
+    return;
+  }
   if (!window.confirm(`删除放映室「${room.name}」？可撤销。`)) return;
   commit(`删除放映室「${room.name}」`, () => { doc.rooms = doc.rooms.filter((r) => r.id !== room.id); });
   renderAll();
