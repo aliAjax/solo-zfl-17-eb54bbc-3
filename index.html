@@ -3,113 +3,181 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>胶片分镜条核对台</title>
+    <title>离线胶片放映编排台</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main class="shell">
-      <header class="hero">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">▤</span>
         <div>
-          <p class="eyebrow">纸质放映胶片整理</p>
-          <h1>胶片分镜条核对台</h1>
+          <h1>离线胶片放映编排台</h1>
+          <p class="subtitle">多厅胶片卷库 · 场次编排 · 冲突与破损风险核对（数据仅保存在本机浏览器）</p>
         </div>
-        <div class="hero-stats">
-          <div>
-            <span>总时长</span>
-            <strong id="totalDuration">0:00</strong>
-          </div>
-          <div>
-            <span>破损片段</span>
-            <strong id="damageCount">0</strong>
-          </div>
-          <div>
-            <span>片段数</span>
-            <strong id="segmentCount">0</strong>
-          </div>
+      </div>
+      <div class="top-actions">
+        <button id="undoBtn" class="btn" type="button" title="撤销 (Ctrl+Z)">↶ 撤销</button>
+        <button id="redoBtn" class="btn" type="button" title="重做 (Ctrl+Y)">↷ 重做</button>
+        <button id="resetDataBtn" class="btn btn-ghost danger" type="button" title="清空并恢复示例数据">重置数据</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <!-- 左：卷库 / 放映室 -->
+      <aside class="panel library-panel">
+        <div class="tabs">
+          <button class="tab active" data-lib-tab="clips" type="button">片库</button>
+          <button class="tab" data-lib-tab="reels" type="button">胶片卷</button>
+          <button class="tab" data-lib-tab="rooms" type="button">放映室</button>
         </div>
-      </header>
 
-      <section class="toolbar">
-        <label>
-          胶片卷
-          <input id="reelTitle" type="text" placeholder="例：春日试映A卷" />
-        </label>
-        <label>
-          颜色偏移
-          <select id="colorFilter">
-            <option value="all">全部</option>
-            <option value="正常">正常</option>
-            <option value="偏红">偏红</option>
-            <option value="偏青">偏青</option>
-            <option value="偏黄">偏黄</option>
-            <option value="褪色">褪色</option>
-          </select>
-        </label>
-        <label>
-          搜索
-          <input id="searchInput" type="search" placeholder="片段编号或备注" />
-        </label>
-        <button id="exportBtn">导出清单</button>
-      </section>
-
-      <section class="layout">
-        <aside class="panel">
-          <h2>录入片段</h2>
-          <form id="segmentForm" class="segment-form">
-            <label>
-              片段编号
-              <input id="codeInput" required placeholder="A-014" />
-            </label>
-            <label>
-              时长秒数
-              <input id="durationInput" required type="number" min="1" value="12" />
-            </label>
-            <label>
-              颜色偏移
-              <select id="shiftInput">
-                <option value="正常">正常</option>
-                <option value="偏红">偏红</option>
-                <option value="偏青">偏青</option>
-                <option value="偏黄">偏黄</option>
-                <option value="褪色">褪色</option>
-              </select>
-            </label>
-            <label>
-              破损情况
-              <select id="damageInput">
-                <option value="完好">完好</option>
-                <option value="轻微划痕">轻微划痕</option>
-                <option value="齿孔破损">齿孔破损</option>
-                <option value="接片松动">接片松动</option>
-                <option value="需跳过">需跳过</option>
-              </select>
-            </label>
-            <label>
-              缩略图
-              <input id="thumbInput" type="file" accept="image/*" />
-            </label>
-            <label>
-              备注
-              <textarea id="noteInput" rows="4" placeholder="试映前要留意的画面、接片或声音点"></textarea>
-            </label>
-            <button class="primary" type="submit">加入放映清单</button>
+        <section data-lib-pane="clips" class="lib-pane">
+          <form id="clipForm" class="stack-form" novalidate>
+            <div class="form-grid">
+              <label>片段编号
+                <input id="clipCode" type="text" placeholder="如 A-001" required />
+              </label>
+              <label>片长（分钟，正整数）
+                <input id="clipDuration" type="number" min="1" step="1" value="10" required />
+              </label>
+              <label>所属胶片卷
+                <select id="clipReel"></select>
+              </label>
+              <label>替代组（同组可互换，可空）
+                <input id="clipAlt" type="text" placeholder="如 G-片头" list="altGroupList" />
+                <datalist id="altGroupList"></datalist>
+              </label>
+              <label class="full">保存状态
+                <select id="clipCondition">
+                  <option value="完好">完好</option>
+                  <option value="轻微划痕">轻微划痕</option>
+                  <option value="齿孔磨损">齿孔磨损</option>
+                  <option value="接片松动（风险）">接片松动（风险）</option>
+                  <option value="脆化（高风险）">脆化（高风险）</option>
+                </select>
+              </label>
+              <label class="full">备注
+                <input id="clipNote" type="text" placeholder="内容、接片点等备注（可空）" />
+              </label>
+            </div>
+            <div class="form-row">
+              <button class="btn btn-primary" type="submit">加入片库</button>
+              <button id="clipFormReset" class="btn btn-ghost" type="button">清空表单</button>
+              <span id="clipFormHint" class="form-hint"></span>
+            </div>
           </form>
-        </aside>
-
-        <section class="panel list-panel">
-          <div class="panel-head">
-            <h2>放映顺序</h2>
-            <span>拖拽片段调整顺序</span>
+          <div class="list-wrap">
+            <input id="clipSearch" class="search" type="search" placeholder="搜索编号 / 备注 / 替代组" />
+            <ul id="clipList" class="item-list"></ul>
           </div>
-          <div id="segmentList" class="segment-list"></div>
         </section>
 
-        <aside class="panel warning-panel">
-          <h2>试映前核对</h2>
-          <div id="warningList" class="warning-list"></div>
-        </aside>
+        <section data-lib-pane="reels" class="lib-pane hidden">
+          <form id="reelForm" class="stack-form inline-form">
+            <input id="reelName" type="text" placeholder="新胶片卷名称，如 修复版B卷" required />
+            <button class="btn btn-primary" type="submit">新增卷</button>
+          </form>
+          <ul id="reelList" class="item-list"></ul>
+        </section>
+
+        <section data-lib-pane="rooms" class="lib-pane hidden">
+          <form id="roomForm" class="stack-form inline-form">
+            <input id="roomName" type="text" placeholder="新放映室名称，如 三号厅" required />
+            <button class="btn btn-primary" type="submit">新增放映室</button>
+          </form>
+          <ul id="roomList" class="item-list"></ul>
+          <label class="setting-line">全局换卷间隔（分钟，正整数）
+            <input id="gapSetting" type="number" min="1" step="1" />
+          </label>
+        </section>
+      </aside>
+
+      <!-- 中：场次 -->
+      <section class="panel session-panel">
+        <div class="session-bar">
+          <div id="sessionTabs" class="session-tabs" role="tablist"></div>
+          <div class="session-bar-actions">
+            <button id="newSessionBtn" class="btn" type="button">＋ 新建场次</button>
+            <button id="copySessionBtn" class="btn" type="button" title="复制当前场次到同一放映室、顺延 30 分钟">⧉ 复制场次</button>
+            <button id="removeSessionBtn" class="btn btn-ghost danger" type="button">移除场次</button>
+          </div>
+        </div>
+
+        <div id="sessionEditor" class="session-editor hidden">
+          <div class="meta-grid">
+            <label>场次名称
+              <input id="sessionName" type="text" />
+            </label>
+            <label>日期
+              <input id="sessionDate" type="date" />
+            </label>
+            <label>开始时间
+              <input id="sessionTime" type="time" />
+            </label>
+            <label>放映室
+              <select id="sessionRoom"></select>
+            </label>
+            <label>换卷间隔（分钟）
+              <input id="sessionGap" type="number" min="1" step="1" />
+            </label>
+          </div>
+
+          <div class="timeline-summary" id="timelineSummary"></div>
+
+          <div class="entry-head">
+            <h3>放映顺序</h3>
+            <span class="hint">拖拽卡片或按 ↑↓ 换序；编号忽略大小写不可重复，片长须为正整数。</span>
+          </div>
+          <ul id="entryList" class="entry-list"></ul>
+
+          <div class="add-entry">
+            <label>从片库添加片段
+              <select id="addClipSelect"></select>
+            </label>
+            <button id="addEntryBtn" class="btn btn-primary" type="button">添加到末尾</button>
+          </div>
+
+          <div class="editor-actions">
+            <button id="saveSessionBtn" class="btn btn-primary" type="button">保存场次（Ctrl+S）</button>
+            <button id="revertSessionBtn" class="btn btn-ghost" type="button" title="放弃本次未保存修改">还原草稿</button>
+            <span id="sessionSaveHint" class="form-hint"></span>
+          </div>
+        </div>
+
+        <p id="noSessionHint" class="empty-hint">还没有场次，点击右上角「新建场次」开始编排。</p>
       </section>
+
+      <!-- 右：核对 / 导出 -->
+      <aside class="panel check-panel">
+        <h2 class="panel-title">实时核对</h2>
+        <div id="summaryCards" class="summary-cards"></div>
+
+        <h3 class="block-head">
+          <span>阻断项（导出前必须全部解决）</span>
+          <span id="blockerCount" class="count-badge">0</span>
+        </h3>
+        <ul id="blockerList" class="issue-list blockers"></ul>
+
+        <h3 class="block-head">
+          <span>冲突</span>
+          <span id="conflictCount" class="count-badge">0</span>
+        </h3>
+        <ul id="conflictList" class="issue-list conflicts"></ul>
+
+        <h3 class="block-head">
+          <span>破损风险</span>
+          <span id="riskCount" class="count-badge">0</span>
+        </h3>
+        <ul id="riskList" class="issue-list risks"></ul>
+
+        <div class="export-box">
+          <button id="exportBtn" class="btn btn-primary btn-block" type="button">导出放映排期表（.txt）</button>
+          <p id="exportHint" class="form-hint"></p>
+        </div>
+      </aside>
     </main>
+
+    <div id="toast" class="toast hidden" role="status"></div>
 
     <script src="app.js"></script>
   </body>

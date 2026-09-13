@@ -1,0 +1,12 @@
+{
+  "name": "film-program-desk-e2e",
+  "private": true,
+  "version": "1.0.0",
+  "description": "离线胶片放映编排台 Playwright 端到端测试",
+  "scripts": {
+    "test": "node e2e.js"
+  },
+  "dependencies": {
+    "playwright": "^1.63.0"
+  }
+}
