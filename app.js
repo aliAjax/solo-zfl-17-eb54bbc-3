@@ -377,17 +377,24 @@ function allSessionViews() {
   return views;
 }
 
-/** 放映室被哪些场次视图引用（已保存场次 / 草稿 / 未保存场次都算） */
+/**
+ * 放映室引用统计：同时看“正式数据”与“当前草稿/未保存场次”两个状态。
+ * - formal：正式场次（已持久化）中引用该厅的数量；只要 >0，删除后刷新就会产生孤儿场次
+ * - inView：当前场次视图（已登记场次的草稿或未保存 pending）中引用该厅的数量
+ * - 任一 >0 即仍在使用，不允许删除
+ * 返回 {formal, inView, total, ids}
+ */
 function roomUsage(roomId) {
   const views = allSessionViews();
-  const referencing = views.filter((v) => v.roomId === roomId);
-  const saved = doc.sessions.filter((s) => s.roomId === roomId).length;
-  // 未保存场次（pending）或草稿里刚改到该厅、但正式数据尚未落到该厅的引用
-  const unsaved = referencing.filter((v) => {
-    const formal = sessionById(v.id);
-    return !formal || formal.roomId !== roomId;
-  }).length;
-  return { total: referencing.length, saved, unsaved };
+  const formalSessions = doc.sessions.filter((s) => s.roomId === roomId);
+  const viewSessions = views.filter((v) => v.roomId === roomId);
+  const ids = new Set([...formalSessions, ...viewSessions].map((s) => s.id));
+  return {
+    formal: formalSessions.length,
+    inView: viewSessions.length,
+    total: ids.size,
+    ids
+  };
 }
 
 /**
@@ -670,9 +677,10 @@ function renderLibrary() {
 
   els.roomList.innerHTML = doc.rooms.map((room) => {
     const usage = roomUsage(room.id);
-    const detail = usage.total
-      ? `${usage.saved} 场已排${usage.unsaved ? ` · ${usage.unsaved} 场未保存引用` : ""}`
-      : "暂无场次使用";
+    const draftOnly = usage.total - usage.formal; // 草稿/未保存场次新改到该厅、正式数据尚未引用的场次
+    let detail;
+    if (!usage.total) detail = "暂无场次使用";
+    else detail = `${usage.formal} 场已排${draftOnly > 0 ? ` · ${draftOnly} 场未保存引用` : ""}`;
     return `
       <li class="room-item">
         <div class="clip-row1">
@@ -1364,13 +1372,14 @@ els.roomList.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-room-delete]");
   if (!btn) return;
   const room = roomById(btn.dataset.roomDelete);
-  // 引用保护：已保存场次、未保存场次（pending）、已登记场次的草稿都算引用
+  // 引用保护：正式数据（旧引用）与当前草稿/未保存场次（新引用）任一仍在使用都不能删
   const usage = roomUsage(room.id);
   if (usage.total) {
+    const draftOnly = usage.total - usage.formal;
     const who = [];
-    if (usage.saved) who.push(`${usage.saved} 场已保存排期`);
-    if (usage.unsaved) who.push(`${usage.unsaved} 场未保存场次正在使用`);
-    toast(`放映室「${room.name}」被${who.join("、")}，请先移除场次或改厅`, "error");
+    if (usage.formal) who.push(`${usage.formal} 场已保存排期（含草稿改走前的旧引用）`);
+    if (draftOnly > 0) who.push(`${draftOnly} 场未保存场次/草稿正在使用`);
+    toast(`放映室「${room.name}」被${who.join("、")}，请先移除场次、改厅或保存/还原草稿`, "error");
     return;
   }
   if (!window.confirm(`删除放映室「${room.name}」？可撤销。`)) return;

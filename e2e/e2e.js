@@ -782,6 +782,188 @@ async function selectByText(page, selector, re) {
 
   check("13 专项全程无 JS 错误", page.__errors.length === 0, JSON.stringify(page.__errors));
 
+  // ========== 14. 改厅草稿下旧/新放映室双向保护 ==========
+  console.log("\n[14] 改厅草稿：旧厅（正式旧引用）与新厅（草稿新引用）都不能删");
+  await page.__ctx.close();
+
+  // 14a/14b：草稿改厅期间，旧厅、新厅都受保护；还原后新厅可删
+  page = await freshPage(browser);
+  await addRoom("三号厅");
+  await addRoom("四号厅");
+  const morningId14 = await page.evaluate(() =>
+    window.__desk.doc.sessions.find((s) => s.name.includes("早场")).id);
+  const oldRoomId14 = await page.evaluate(() =>
+    window.__desk.doc.rooms.find((r) => r.name === "一号厅").id);
+  const newRoomId14 = await page.evaluate(() =>
+    window.__desk.doc.rooms.find((r) => r.name === "三号厅").id);
+
+  // 早场（正式在一号厅）草稿改到三号厅，但不保存
+  await page.click(`[data-session-tab="${morningId14}"]`);
+  await page.selectOption("#sessionRoom", { label: "三号厅" });
+  await page.waitForTimeout(40);
+  check("14 草稿已改厅（未保存）",
+    (await page.locator("#sessionSaveHint").innerText()).includes("未保存修改"));
+  check("14 草稿下正式早场仍引用一号厅",
+    await page.evaluate(([mid, rid]) =>
+      window.__desk.doc.sessions.find((s) => s.id === mid).roomId === rid,
+      [morningId14, oldRoomId14]));
+
+  // 尝试删旧厅一号厅 → 必须被拒（正式旧引用仍在）
+  await openRoomsTab();
+  check("14 旧厅列表仍显示 1 场已排",
+    (await roomItem("一号厅").innerText()).includes("1 场已排"));
+  await roomItem("一号厅").locator("[data-room-delete]").click();
+  await page.waitForTimeout(40);
+  const toastOld = await page.locator("#toast").innerText();
+  check("14 改厅草稿后删除旧厅被拒（含旧引用说明）",
+    toastOld.includes("一号厅") && toastOld.includes("已保存排期"), toastOld);
+  check("14 旧厅仍在", await roomItem("一号厅").count() === 1);
+  check("14 拒绝后正式数据无孤儿厅", await noOrphanRooms());
+
+  // 尝试删新厅三号厅 → 必须被拒（草稿新引用）
+  check("14 新厅列表显示未保存引用",
+    (await roomItem("三号厅").innerText()).includes("1 场未保存引用"));
+  await roomItem("三号厅").locator("[data-room-delete]").click();
+  await page.waitForTimeout(40);
+  const toastNew = await page.locator("#toast").innerText();
+  check("14 删除草稿新引用的厅被拒", toastNew.includes("三号厅") && toastNew.includes("未保存"), toastNew);
+  check("14 新厅仍在", await roomItem("三号厅").count() === 1);
+  check("14 新厅被拒后正式数据仍无孤儿", await noOrphanRooms());
+
+  // 完全闲置的四号厅仍可删除
+  await roomItem("四号厅").locator("[data-room-delete]").click();
+  await page.waitForTimeout(40);
+  check("14 闲置厅仍可正常删除", await roomItem("四号厅").count() === 0);
+  await page.click("#undoBtn");
+  await page.waitForTimeout(40);
+  check("14 撤销恢复闲置厅", await roomItem("四号厅").count() === 1);
+
+  // 14b. 还原草稿 → 早场回一号厅，三号厅失去引用变为可删
+  await page.click(`[data-session-tab="${morningId14}"]`);
+  await page.click("#revertSessionBtn");
+  await page.waitForTimeout(40);
+  check("14 还原后草稿新厅变为暂无使用",
+    (await roomItem("三号厅").innerText()).includes("暂无场次使用"));
+  check("14 还原后旧厅仍 1 场已排",
+    (await roomItem("一号厅").innerText()).includes("1 场已排"));
+  await openRoomsTab();
+  await roomItem("三号厅").locator("[data-room-delete]").click();
+  await page.waitForTimeout(40);
+  check("14 还原后新厅可删除", await roomItem("三号厅").count() === 0);
+  check("14 还原删除路径无孤儿", await noOrphanRooms());
+  await page.click("#undoBtn");
+  await page.waitForTimeout(40);
+  check("14 撤销恢复三号厅", await roomItem("三号厅").count() === 1);
+  await page.__ctx.close();
+
+  // 14c：保存改厅后，旧厅可删、新厅受保护；删旧厅+撤销/刷新均无孤儿
+  page = await freshPage(browser);
+  await addRoom("三号厅");
+  const mid14c = await page.evaluate(() =>
+    window.__desk.doc.sessions.find((s) => s.name.includes("早场")).id);
+  await page.click(`[data-session-tab="${mid14c}"]`);
+  await page.selectOption("#sessionRoom", { label: "三号厅" });
+  await page.click("#saveSessionBtn");
+  await page.waitForTimeout(40);
+  check("14 保存改厅成功（正式早场=三号厅）",
+    await page.evaluate(([mid, nm]) => {
+      const s = window.__desk.doc.sessions.find((x) => x.id === mid);
+      return s.roomId === window.__desk.doc.rooms.find((r) => r.name === nm).id;
+    }, [mid14c, "三号厅"]));
+  check("14 保存后无阻断无冲突、导出可用",
+    (await page.locator("#blockerCount").textContent()) === "0" &&
+    (await page.locator("#conflictCount").textContent()) === "0" &&
+    await page.locator("#exportBtn").isEnabled());
+  await openRoomsTab();
+  check("14 保存后旧厅变为暂无使用",
+    (await roomItem("一号厅").innerText()).includes("暂无场次使用"));
+  check("14 保存后新厅显示 1 场已排",
+    (await roomItem("三号厅").innerText()).includes("1 场已排"));
+  // 删除旧厅
+  await roomItem("一号厅").locator("[data-room-delete]").click();
+  await page.waitForTimeout(40);
+  check("14 保存后旧厅可删除", await roomItem("一号厅").count() === 0);
+  check("14 删除旧厅后无孤儿场次", await noOrphanRooms());
+  // 撤销删除旧厅
+  await page.click("#undoBtn");
+  await page.waitForTimeout(40);
+  check("14 撤销恢复旧厅", await roomItem("一号厅").count() === 1);
+  check("14 撤销后场次仍引用新厅（无孤儿）",
+    await page.evaluate(([mid, nm]) => {
+      const s = window.__desk.doc.sessions.find((x) => x.id === mid);
+      return s.roomId === window.__desk.doc.rooms.find((r) => r.name === nm).id &&
+        window.__desk.doc.rooms.some((r) => r.id === s.roomId);
+    }, [mid14c, "三号厅"]));
+  await page.click("#redoBtn");
+  await page.waitForTimeout(40);
+  check("14 重做再次删除旧厅、无孤儿",
+    await roomItem("一号厅").count() === 0 && await noOrphanRooms());
+  await page.reload();
+  await page.waitForSelector(".session-tab");
+  check("14 刷新后无孤儿厅", await noOrphanRooms());
+  check("14 刷新后早场仍在三号厅",
+    await page.evaluate((nm) => {
+      const d = JSON.parse(localStorage.getItem("film-program-desk-v1"));
+      const s = d.sessions.find((x) => x.name.includes("早场"));
+      return d.rooms.some((r) => r.id === s.roomId && r.name === nm);
+    }, "三号厅"));
+  await page.__ctx.close();
+
+  // 14d：撤销/重做“保存改厅”这一步，不产生孤儿；刷新仍有效
+  page = await freshPage(browser);
+  await addRoom("三号厅");
+  const mid14d = await page.evaluate(() =>
+    window.__desk.doc.sessions.find((s) => s.name.includes("早场")).id);
+  await page.click(`[data-session-tab="${mid14d}"]`);
+  await page.selectOption("#sessionRoom", { label: "三号厅" });
+  await page.click("#saveSessionBtn");
+  await page.waitForTimeout(40);
+  check("14 保存改厅入档",
+    await page.evaluate(([mid, nm]) => {
+      const s = window.__desk.doc.sessions.find((x) => x.id === mid);
+      return s.roomId === window.__desk.doc.rooms.find((r) => r.name === nm).id;
+    }, [mid14d, "三号厅"]));
+  await page.click("#undoBtn"); // 撤销保存改厅 → 正式回到一号厅
+  await page.waitForTimeout(40);
+  check("14 撤销保存后早场正式回到一号厅",
+    await page.evaluate(([mid, nm]) => {
+      const s = window.__desk.doc.sessions.find((x) => x.id === mid);
+      return s.roomId === window.__desk.doc.rooms.find((r) => r.name === nm).id;
+    }, [mid14d, "一号厅"]));
+  check("14 撤销保存后无孤儿", await noOrphanRooms());
+  check("14 撤销保存后旧厅重新受保护（删除被拒）",
+    (await roomItem("一号厅").innerText()).includes("1 场已排"));
+  await openRoomsTab();
+  await roomItem("一号厅").locator("[data-room-delete]").click();
+  await page.waitForTimeout(40);
+  check("14 撤销后删旧厅确实被拦截",
+    (await page.locator("#toast").innerText()).includes("已保存排期") &&
+    await roomItem("一号厅").count() === 1);
+  await page.click("#redoBtn");
+  await page.waitForTimeout(40);
+  check("14 重做后早场再到三号厅、无孤儿",
+    await page.evaluate(([mid, nm]) => {
+      const s = window.__desk.doc.sessions.find((x) => x.id === mid);
+      return s.roomId === window.__desk.doc.rooms.find((r) => r.name === nm).id;
+    }, [mid14d, "三号厅"]) && await noOrphanRooms());
+  await page.reload();
+  await page.waitForSelector(".session-tab");
+  check("14 刷新后引用仍有效、无孤儿", await noOrphanRooms());
+
+  // 14e. 时间轴/冲突/导出按原逻辑：保存改厅后导出含新厅
+  check("14 导出按钮可用", await page.locator("#exportBtn").isEnabled());
+  const [dl14] = await Promise.all([
+    page.waitForEvent("download"),
+    page.click("#exportBtn")
+  ]);
+  const out14 = path.join("/tmp/pwtest", dl14.suggestedFilename());
+  await dl14.saveAs(out14);
+  const txt14 = fs.readFileSync(out14, "utf8");
+  check("14 导出文件含早场与三号厅", txt14.includes("早场") && txt14.includes("三号厅"));
+  check("14 导出仍含逐段时间轴（09:00）", txt14.includes("09:00"));
+
+  check("14 专项全程无 JS 错误", page.__errors.length === 0, JSON.stringify(page.__errors));
+
   await page.__ctx.close();
   await browser.close();
 
