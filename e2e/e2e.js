@@ -115,39 +115,51 @@ async function selectByText(page, selector, re) {
   check("总占用 90 分钟（80 正片 + 10 缓冲）", /占用总时长\s*1\s*小时\s*30\s*分/.test(m), m);
   check("页面无 JS 错误", page.__errors.length === 0, JSON.stringify(page.__errors));
 
-  // ========== 2. 复制场次 ==========
-  console.log("\n[2] 复制场次");
+  // ========== 2. 复制场次（未保存的 pending，不进正式数据） ==========
+  console.log("\n[2] 复制场次：停留在未保存状态");
   await page.click("#copySessionBtn");
-  check("场次变为 3 个", (await page.locator(".session-tab").count()) === 3);
+  check("标签变为 3 个（含未保存副本）", (await page.locator(".session-tab").count()) === 3);
   check("新副本处于激活状态",
     (await page.locator(".session-tab.active").innerText()).includes("副本"));
+  check("副本标签带“未保存”标记",
+    (await page.locator(".session-tab.active").innerText()).includes("未保存"));
   check("副本同厅+顺延 30 分钟（开始 09:30）",
     await page.locator("#sessionTime").inputValue() === "09:30");
   check("日期仍为 2026-09-20", await page.locator("#sessionDate").inputValue() === "2026-09-20");
   check("副本条目完整复制（5 段）", await count(page.locator(".entry-card")) === 5);
-  check("复制操作已入撤销栈（撤销按钮可用）", await page.locator("#undoBtn").isEnabled());
+  check("正式数据 doc.sessions 仍为 2 场（未写入）",
+    await page.evaluate(() => window.__desk.doc.sessions.length) === 2);
+  check("内存中存在 pendingSession 且保留全部 5 条目",
+    await page.evaluate(() => !!(window.__desk.ui.pendingSession &&
+      window.__desk.ui.pendingSession.entries.length === 5)));
+  check("本机存档中没有副本（仍为 2 场）",
+    await page.evaluate(() => JSON.parse(localStorage.getItem("film-program-desk-v1")).sessions.length) === 2);
+  check("保存按钮显示“保存副本”",
+    (await page.locator("#saveSessionBtn").innerText()).includes("保存副本"));
+  check("复制不进撤销栈（撤销按钮仍禁用）", await page.locator("#undoBtn").isDisabled());
 
-  // ========== 3. 跨场冲突 ==========
-  console.log("\n[3] 跨场冲突：同厅 + 同卷");
+  // ========== 3. 跨场冲突：同厅 + 同卷（未保存副本同样参与校验且无法保存） ==========
+  console.log("\n[3] 跨场冲突：同厅 + 同卷（阻断副本入档）");
   await page.waitForTimeout(50);
   let conflictText = await page.locator("#conflictList").innerText();
   const nConf = Number(await page.locator("#conflictCount").textContent());
   check("冲突数 ≥ 2（同厅 + 同卷）", nConf >= 2, `实际 ${nConf}`);
   check("包含放映室冲突", conflictText.includes("放映室冲突"));
   check("包含胶片卷冲突（原版A卷）", conflictText.includes("胶片卷冲突") && conflictText.includes("原版A卷"));
-  // 已提交的场次本身存在冲突：任何编辑都会进入草稿，草稿保存被拒
+  // 编辑 pending（换卷间隔），有冲突时保存仍被拒
   await page.fill("#sessionGap", "6");
   await page.waitForTimeout(50);
-  check("有冲突时编辑后保存被拒绝",
-    (await page.locator("#sessionSaveHint").innerText()).includes("不能保存"));
+  check("有冲突时保存被拒绝（未写入存档）",
+    (await page.locator("#sessionSaveHint").innerText()).includes("未写入存档") &&
+    (await page.locator("#sessionSaveHint").innerText()).includes("冲突"));
   await page.fill("#sessionGap", "5");
   check("有冲突时导出按钮禁用", await page.locator("#exportBtn").isDisabled());
 
-  // 时间轴仍实时计算：副本 10:00 开始
+  // 时间轴仍实时计算：副本 09:30 开始
   m = await currentMetrics(page);
   check("副本总占用仍为 90 分钟（实时显示）", /占用总时长\s*1\s*小时\s*30\s*分/.test(m), m);
 
-  // 冲突项点击定位：点击同厅冲突，应在两个场次间跳转
+  // 冲突项点击定位：点击同厅冲突，应在原场与副本之间跳转
   const roomConflict = page.locator(".issue.conflict", { hasText: "放映室冲突" }).first();
   await roomConflict.click();
   await page.waitForTimeout(50);
@@ -166,12 +178,14 @@ async function selectByText(page, selector, re) {
   conflictText = await page.locator("#conflictList").innerText();
   check("换厅后放映室冲突消失", !conflictText.includes("放映室冲突"), conflictText.slice(0, 80));
   check("同卷冲突依然存在（胶片卷不能同时在两处放）", conflictText.includes("胶片卷冲突"));
-  check("仍不能保存", (await page.locator("#sessionSaveHint").innerText()).includes("不能保存"));
+  check("仍不能保存", (await page.locator("#sessionSaveHint").innerText()).includes("未写入存档"));
+  check("换厅编辑仍未落库（正式数据 2 场）",
+    await page.evaluate(() => window.__desk.doc.sessions.length) === 2);
 
-  // 改回一号厅，稍后再统一处理
+  // 改回一号厅
   await page.selectOption("#sessionRoom", { label: "一号厅" });
 
-  // ========== 4. 实时统计：按钮与拖拽换序、缓冲 ==========
+  // ========== 4. 实时统计：按钮与拖拽换序、缓冲（均发生在未保存副本上） ==========
   console.log("\n[4] 换序实时统计（按钮 + 拖拽）");
   // 副本当前顺序 A-001 A-002 A-003 B-014 D-002
   let codes = await entryCodes(page);
@@ -201,28 +215,39 @@ async function selectByText(page, selector, re) {
   check("拖拽后缓冲实时变为 4 次共 20 分", /换卷缓冲\s*4 次 \/ 共 20 分钟/.test(m), m);
   check("散场 11:10（09:30 + 100 分钟）", /散场\s*11:10(?!\S)/.test(m), m);
 
-  // 还原：直接放弃草稿（副本恢复到保存状态：A-001..D-002，一号厅 10:00，仍冲突）
+  // 还原：放弃未保存副本，应直接消失、不入正式数据、无撤销栈痕迹
   await page.click("#revertSessionBtn");
-  codes = await entryCodes(page);
-  check("还原草稿恢复原顺序", codes.join(",") === "A-001,A-002,A-003,B-014,D-002", codes.join(","));
+  check("还原后副本标签消失（剩 2 场）", (await page.locator(".session-tab").count()) === 2);
+  check("还原后 pending 已清空",
+    await page.evaluate(() => window.__desk.ui.pendingSession === null));
+  check("还原后活动场次回到早场",
+    (await page.locator(".session-tab.active").innerText()).includes("早场"));
+  check("还原后冲突归零", (await page.locator("#conflictCount").textContent()) === "0");
+  check("撤销按钮仍禁用（放弃副本不是一步历史操作）",
+    await page.locator("#undoBtn").isDisabled());
+  check("本机存档仍为 2 场",
+    await page.evaluate(() => JSON.parse(localStorage.getItem("film-program-desk-v1")).sessions.length) === 2);
 
-  // 真正解决副本冲突：把副本删掉，改用“新建场次 + 替代片段”另排
+  // 再复制一次，并演示“移除”也只是丢弃未保存副本
+  await page.click("#copySessionBtn");
+  check("再次复制出现未保存副本", (await page.locator(".session-tab").count()) === 3);
   await page.click("#removeSessionBtn");
-  check("副本已移除（剩 2 场）", (await page.locator(".session-tab").count()) === 2);
-  check("冲突归零", (await page.locator("#conflictCount").textContent()) === "0");
-  // 撤销移除
-  await page.click("#undoBtn");
-  check("撤销移除 → 副本回来（3 场）", (await page.locator(".session-tab").count()) === 3);
-  await page.click("#redoBtn");
-  check("重做 → 副本再次移除（2 场）", (await page.locator(".session-tab").count()) === 2);
+  check("移除未保存副本 → 剩 2 场", (await page.locator(".session-tab").count()) === 2);
+  check("移除未保存副本不进撤销栈（撤销按钮仍禁用）",
+    await page.locator("#undoBtn").isDisabled());
+  check("本机存档仍为 2 场",
+    await page.evaluate(() => JSON.parse(localStorage.getItem("film-program-desk-v1")).sessions.length) === 2);
 
-  // ========== 5. 替代片段（跨场消除同卷冲突） ==========
-  console.log("\n[5] 替代片段");
-  // 新建一场：2026-09-20 09:00 二号厅，只放 A-001
+  // ========== 5. 替代片段（未保存新场次：跨场消除同卷冲突后保存入档） ==========
+  console.log("\n[5] 替代片段（未保存新场次，保存后才入档）");
+  // 新建一场（pending）：2026-09-20 09:00 二号厅，只放 A-001
   await page.click("#newSessionBtn");
+  check("新建后为未保存标签",
+    (await page.locator(".session-tab.active").innerText()).includes("未保存"));
+  check("新建未入正式数据（仍 2 场）",
+    await page.evaluate(() => window.__desk.doc.sessions.length) === 2);
   await page.fill("#sessionName", "替代测试场");
   await page.fill("#sessionDate", "2026-09-20");
-  // time 用 selectOption 风格 fill
   await page.fill("#sessionTime", "09:00");
   await page.selectOption("#sessionRoom", { label: "二号厅" });
   await selectByText(page, "#addClipSelect", /A-001/);
@@ -230,7 +255,8 @@ async function selectByText(page, selector, re) {
   await page.waitForTimeout(50);
   let conf2 = await page.locator("#conflictList").innerText();
   check("不同厅同卷同时间 → 胶片卷冲突", conf2.includes("胶片卷冲突"), conf2.slice(0, 100));
-  check("保存被拒（同卷冲突）", (await page.locator("#sessionSaveHint").innerText()).includes("不能保存"));
+  check("保存被拒（同卷冲突，未写入存档）",
+    (await page.locator("#sessionSaveHint").innerText()).includes("未写入存档"));
 
   // 条目上出现替代选择器（A-001 属 G-开场，可替成 B-009）
   const altSelect = page.locator(".entry-card select[data-alt-select]");
@@ -473,6 +499,134 @@ async function selectByText(page, selector, re) {
   await page.screenshot({ path: path.join(SHOT_DIR, "exported.png"), fullPage: true });
 
   check("全程无 JS 错误", page.__errors.length === 0, JSON.stringify(page.__errors));
+
+  // ========== 12. 复制门禁专项：同厅冲突 / 同卷冲突 / 复制后刷新 / 撤销 / 还原 / 正常复制 ==========
+  console.log("\n[12] 复制门禁专项（同厅、同卷、刷新、撤销、还原、正常复制）");
+  await page.__ctx.close();
+  page = await freshPage(browser);
+  await setupDropEvent(page);
+  const persistedSessions = () =>
+    page.evaluate(() => JSON.parse(localStorage.getItem("film-program-desk-v1")).sessions.length);
+
+  // 12a. 同厅冲突：复制（顺延 30 分钟）→ 副本停留未保存，存档不被污染，强制保存被拒
+  await page.click("#copySessionBtn");
+  check("12 同厅冲突：副本带未保存标记",
+    (await page.locator(".session-tab.active").innerText()).includes("未保存"));
+  check("12 同厅冲突：检出放映室冲突",
+    (await page.locator("#conflictList").innerText()).includes("放映室冲突"));
+  check("12 同厅冲突：正式数据仍 2 场",
+    await page.evaluate(() => window.__desk.doc.sessions.length) === 2);
+  check("12 同厅冲突：本机存档仍 2 场（未被污染）", await persistedSessions() === 2);
+  await page.click("#saveSessionBtn");
+  await page.waitForTimeout(40);
+  check("12 同厅冲突：强制保存被拒且仍未入档",
+    (await persistedSessions()) === 2 &&
+    (await page.locator("#sessionSaveHint").innerText()).includes("未写入存档"));
+  check("12 同厅冲突：导出按钮禁用", await page.locator("#exportBtn").isDisabled());
+
+  // 12b. 复制后刷新：未保存副本必须消失
+  await page.reload();
+  await page.waitForSelector(".session-tab");
+  check("12 复制后刷新：副本未残留（2 场）", await count(page.locator(".session-tab")) === 2);
+  check("12 复制后刷新：存档无任何副本",
+    await page.evaluate(() =>
+      JSON.parse(localStorage.getItem("film-program-desk-v1")).sessions.every((s) => !s.name.includes("副本"))));
+  check("12 复制后刷新：冲突归零", (await page.locator("#conflictCount").textContent()) === "0");
+
+  // 12c. 正常复制：改到不冲突时间后保存 → 正式数据/存档/撤销栈都应有，条目完整
+  await page.click("#copySessionBtn");
+  await page.fill("#sessionTime", "20:00"); // 20:00–21:30，与 09:00 早场不冲突
+  await page.waitForTimeout(50);
+  check("12 正常复制：改时间后无冲突", (await page.locator("#conflictCount").textContent()) === "0");
+  check("12 正常复制：全部 5 条目保留", await count(page.locator(".entry-card")) === 5);
+  check("12 正常复制：替代片段关系仍在（A-001 条目带替代下拉）",
+    await count(page.locator(".entry-card select[data-alt-select]")) >= 1);
+  check("12 正常复制：时间轴正常（20:00 开场）",
+    (await currentMetrics(page)).includes("20:00"));
+  await page.click("#saveSessionBtn");
+  await page.waitForTimeout(50);
+  check("12 正常复制：保存后正式数据 3 场",
+    await page.evaluate(() => window.__desk.doc.sessions.length) === 3);
+  check("12 正常复制：本机存档 3 场且含副本",
+    (await persistedSessions()) === 3 &&
+    await page.evaluate(() =>
+      JSON.parse(localStorage.getItem("film-program-desk-v1")).sessions.some((s) => s.name.includes("副本"))));
+  check("12 正常复制：副本 5 条目完整入档",
+    await page.evaluate(() =>
+      window.__desk.doc.sessions.find((s) => s.name.includes("副本")).entries.length) === 5);
+  check("12 正常复制：未保存标记消失",
+    !(await page.locator(".session-tab.active").innerText()).includes("未保存"));
+  check("12 正常复制：进入撤销栈", await page.locator("#undoBtn").isEnabled());
+
+  // 12d. 撤销 / 重做已保存的复制
+  await page.click("#undoBtn");
+  await page.waitForTimeout(40);
+  check("12 撤销：复制被撤销，正式数据回到 2 场",
+    await page.evaluate(() => window.__desk.doc.sessions.length) === 2);
+  check("12 撤销：存档同步回到 2 场", await persistedSessions() === 2);
+  await page.click("#redoBtn");
+  await page.waitForTimeout(40);
+  check("12 重做：复制恢复为 3 场",
+    await page.evaluate(() => window.__desk.doc.sessions.length) === 3);
+
+  // 12e. 冲突副本点“还原” → 直接丢弃，不入历史
+  await page.click("#copySessionBtn"); // 从早场再复制一份 09:30 冲突副本
+  check("12 还原：出现第 4 个标签（未保存副本）",
+    await count(page.locator(".session-tab")) === 4);
+  const undoTitleBefore = await page.locator("#undoBtn").getAttribute("title");
+  await page.click("#revertSessionBtn");
+  await page.waitForTimeout(40);
+  check("12 还原：副本丢弃（剩 3 场）", await count(page.locator(".session-tab")) === 3);
+  check("12 还原：本机存档仍 3 场", await persistedSessions() === 3);
+  check("12 还原：放弃副本不进撤销栈（栈顶不变）",
+    (await page.locator("#undoBtn").getAttribute("title")) === undoTitleBefore);
+
+  // 12f. 同卷冲突（跨厅）：副本换到二号厅 → 同厅消失、同卷仍在，仍不能保存
+  await page.click("#copySessionBtn");
+  await page.selectOption("#sessionRoom", { label: "二号厅" });
+  await page.waitForTimeout(50);
+  const confTxt = await page.locator("#conflictList").innerText();
+  check("12 跨厅同卷：放映室冲突消失", !confTxt.includes("放映室冲突"));
+  check("12 跨厅同卷：胶片卷冲突仍被检出", confTxt.includes("胶片卷冲突"));
+  await page.click("#saveSessionBtn");
+  await page.waitForTimeout(40);
+  check("12 跨厅同卷：保存仍被拒、未入档（仍 3 场）", await persistedSessions() === 3);
+  await page.click("#revertSessionBtn");
+  check("12 跨厅同卷：还原后回到 3 场", await count(page.locator(".session-tab")) === 3);
+
+  // 12g. 未保存副本期间，撤销其他操作（如片库修改）不能误杀副本，也不能让冲突副本溜进正式数据
+  await page.click("#copySessionBtn"); // 09:30 冲突副本（pending）
+  check("12 干扰撤销：出现未保存冲突副本",
+    (await page.locator(".session-tab.active").innerText()).includes("未保存") &&
+    (await page.locator("#conflictCount").textContent()) !== "0");
+  // 在片库新增一个片段（产生一条独立历史）
+  await page.fill("#clipCode", "T-900");
+  await page.fill("#clipDuration", "8");
+  await page.selectOption("#clipReel", { label: "原版A卷" });
+  await page.click(".stack-form button[type=submit]");
+  await page.waitForTimeout(40);
+  check("12 干扰撤销：片库新增已提交（9 个片段）",
+    await count(page.locator(".clip-item")) === 9);
+  check("12 干扰撤销：新增期间冲突副本仍在且未入档",
+    await count(page.locator(".session-tab")) === 4 && await persistedSessions() === 3);
+  // 撤销片库新增
+  await page.click("#undoBtn");
+  await page.waitForTimeout(40);
+  check("12 干扰撤销：撤销片库新增后片段回到 8 个",
+    await count(page.locator(".clip-item")) === 8);
+  check("12 干扰撤销：未保存副本仍在（4 个标签）",
+    await count(page.locator(".session-tab")) === 4);
+  check("12 干扰撤销：副本仍未写入正式数据（3 场）", await persistedSessions() === 3);
+  check("12 干扰撤销：冲突仍被检出、保存仍被拒",
+    (await page.locator("#conflictCount").textContent()) !== "0" &&
+    await page.locator("#exportBtn").isDisabled());
+  // 放弃副本，回到干净的 3 场
+  await page.click("#revertSessionBtn");
+  check("12 干扰撤销：还原后回到 3 场、无冲突",
+    await count(page.locator(".session-tab")) === 3 &&
+    (await page.locator("#conflictCount").textContent()) === "0");
+
+  check("12 专项全程无 JS 错误", page.__errors.length === 0, JSON.stringify(page.__errors));
 
   await page.__ctx.close();
   await browser.close();

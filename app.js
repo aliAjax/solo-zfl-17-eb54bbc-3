@@ -87,6 +87,7 @@ let ui = {
   libTab: "clips",
   activeSessionId: null,
   drafts: {}, // sessionId -> 草稿（含 name/date/startTime/roomId/gap/entries）
+  pendingSession: null, // 复制/新建后尚未保存的“未登记场次”：通过校验并保存前不进入 doc、不写存档
   clipSearch: "",
   editingClipId: null
 };
@@ -148,8 +149,10 @@ function undo() {
   doc = JSON.parse(prev.snapshot);
   // 撤销后草稿可能引用已不存在的场次
   pruneDrafts();
-  if (ui.activeSessionId && !doc.sessions.some((s) => s.id === ui.activeSessionId)) {
-    ui.activeSessionId = doc.sessions[0]?.id ?? null;
+  if (!activeSessionStillExists()) {
+    ui.activeSessionId = doc.selectedSessionId && sessionById(doc.selectedSessionId)
+      ? doc.selectedSessionId
+      : doc.sessions[0]?.id ?? null;
   }
   persist();
   persistHistory();
@@ -163,8 +166,10 @@ function redo() {
   history.past.push({ label: next.label, snapshot: JSON.stringify(doc) });
   doc = JSON.parse(next.snapshot);
   pruneDrafts();
-  if (ui.activeSessionId && !doc.sessions.some((s) => s.id === ui.activeSessionId)) {
-    ui.activeSessionId = doc.sessions[0]?.id ?? null;
+  if (!activeSessionStillExists()) {
+    ui.activeSessionId = doc.selectedSessionId && sessionById(doc.selectedSessionId)
+      ? doc.selectedSessionId
+      : doc.sessions[0]?.id ?? null;
   }
   persist();
   persistHistory();
@@ -183,6 +188,14 @@ function pruneDrafts() {
   for (const key of Object.keys(ui.drafts)) {
     if (!doc.sessions.some((s) => s.id === key)) delete ui.drafts[key];
   }
+}
+
+/** 当前活动场次是否仍有效（已登记，或未保存的 pending） */
+function activeSessionStillExists() {
+  const id = ui.activeSessionId;
+  if (!id) return false;
+  if (doc.sessions.some((s) => s.id === id)) return true;
+  return !!(ui.pendingSession && ui.pendingSession.id === id);
 }
 
 /* ---------------- 小工具 ---------------- */
@@ -251,8 +264,9 @@ function effectiveClip(entry) {
   return clipById(entry.altClipId || entry.clipId) || null;
 }
 
-/** 用于校验的场次视图：当前场次用草稿，其他用已保存数据 */
+/** 用于校验的场次视图：未登记场次返回它本身，已登记场次当前有草稿则返回草稿，否则返回正式数据 */
 function sessionView(id) {
+  if (ui.pendingSession && ui.pendingSession.id === id) return ui.pendingSession;
   if (ui.drafts[id]) return { ...ui.drafts[id], __isDraft: true };
   return sessionById(id) || null;
 }
@@ -357,7 +371,9 @@ function overlaps(aStart, aEnd, bStart, bEnd) {
 }
 
 function allSessionViews() {
-  return doc.sessions.map((s) => sessionView(s.id)).filter(Boolean);
+  const views = doc.sessions.map((s) => sessionView(s.id)).filter(Boolean);
+  if (ui.pendingSession) views.push(ui.pendingSession);
+  return views;
 }
 
 /**
@@ -666,11 +682,14 @@ function sessionStatus(sv, tl) {
 }
 
 function renderSessionArea() {
-  if (!ui.activeSessionId || !sessionById(ui.activeSessionId)) {
-    ui.activeSessionId = doc.sessions.at(-1)?.id ?? null; // 默认选最新一场
+  const pending = ui.pendingSession;
+  // 活动场次必须是已登记场次或未登记场次之一；否则回落到最新已登记场次
+  if (!ui.activeSessionId ||
+      (!sessionById(ui.activeSessionId) && !(pending && pending.id === ui.activeSessionId))) {
+    ui.activeSessionId = doc.sessions.at(-1)?.id ?? (pending ? pending.id : null);
   }
 
-  els.sessionTabs.innerHTML = doc.sessions.map((s) => {
+  const tabs = doc.sessions.map((s) => {
     const sv = sessionView(s.id);
     const tl = lastValidation.timelines.get(s.id) || computeTimeline(sv);
     const status = sessionStatus(sv, tl);
@@ -680,10 +699,25 @@ function renderSessionArea() {
       <button class="session-tab ${active} ${dirty}" data-session-tab="${s.id}" type="button">
         <span class="dot ${status}"></span>${esc(s.name || "未命名场次")}
       </button>`;
-  }).join("");
+  });
+
+  // 未登记场次标签（不写入存档，强制保存/放弃）
+  if (pending) {
+    const tl = lastValidation.timelines.get(pending.id) || computeTimeline(pending);
+    const status = sessionStatus(pending, tl);
+    const active = pending.id === ui.activeSessionId ? "active" : "";
+    tabs.push(`
+      <button class="session-tab ${active} dirty pending" data-session-tab="${pending.id}" type="button"
+        title="未保存：保存前不会写入本机存档，刷新或放弃即消失">
+        <span class="dot ${status}"></span>${esc(pending.name || "未命名场次")}<span class="unsaved-badge">未保存</span>
+      </button>`);
+  }
+  els.sessionTabs.innerHTML = tabs.join("");
 
   const sv = ui.activeSessionId ? sessionView(ui.activeSessionId) : null;
-  els.copySessionBtn.disabled = !sv;
+  const isPending = !!(pending && sv && pending.id === sv.id);
+  els.newSessionBtn.disabled = !!pending;
+  els.copySessionBtn.disabled = !sv || !!pending;
   els.removeSessionBtn.disabled = !sv;
   if (!sv) {
     els.sessionEditor.classList.add("hidden");
@@ -708,9 +742,12 @@ function renderSessionArea() {
   const tl = lastValidation.timelines.get(sv.id);
   const inConflict = lastValidation.conflicts.some(
     (c) => c.sessionId === sv.id || c.otherSessionId === sv.id);
-  const isDirty = !!ui.drafts[sv.id];
+  const isDirty = isPending || !!ui.drafts[sv.id];
   els.saveSessionBtn.disabled = !isDirty;
   els.revertSessionBtn.disabled = !isDirty;
+  els.saveSessionBtn.textContent = isPending
+    ? (ui.pendingKind === "duplicate" ? "保存副本（Ctrl+S）" : "保存新场次（Ctrl+S）")
+    : "保存场次（Ctrl+S）";
 
   const localBlockers = lastValidation.blockers.filter((b) => b.sessionId === sv.id).length;
   if (!isDirty) {
@@ -720,10 +757,13 @@ function renderSessionArea() {
     const bits = [];
     if (localBlockers) bits.push(`${localBlockers} 个场内问题`);
     if (inConflict) bits.push("存在跨场冲突");
-    els.sessionSaveHint.textContent = `草稿不能保存：${bits.join("，")}（见右侧核对栏）`;
+    els.sessionSaveHint.textContent =
+      (isPending ? "未保存、未写入存档" : "草稿不能保存") + `：${bits.join("，")}（见右侧核对栏）`;
     els.sessionSaveHint.className = "form-hint error";
   } else {
-    els.sessionSaveHint.textContent = "有未保存修改";
+    els.sessionSaveHint.textContent = isPending
+      ? "无阻断与冲突，点击保存才会写入本机存档"
+      : "有未保存修改";
     els.sessionSaveHint.className = "form-hint";
   }
 }
@@ -870,6 +910,11 @@ function renderCheckPanel() {
     `<li class="empty-line">暂无破损风险。</li>`;
 
   els.exportBtn.disabled = blockers.length + conflicts.length > 0;
+
+  if (ui.pendingSession) {
+    els.exportHint.className = "form-hint";
+    els.exportHint.textContent = "有未保存的复制/新建场次，保存后才会进入正式数据与导出文件。";
+  }
 }
 
 /* ============================================================
@@ -884,8 +929,13 @@ function ensureDraft(sessionId) {
   return draft;
 }
 
-/** 更新草稿后重算（不写正式数据） */
+/** 更新草稿后重算（不写正式数据）；未登记场次直接原地修改 pending */
 function mutateDraft(sessionId, fn) {
+  if (ui.pendingSession && ui.pendingSession.id === sessionId) {
+    fn(ui.pendingSession);
+    renderAll();
+    return;
+  }
   const d = ensureDraft(sessionId);
   fn(d);
   renderAll();
@@ -901,7 +951,32 @@ function draftSaveable(sessionId) {
 
 function saveDraft() {
   const id = ui.activeSessionId;
-  if (!id || !ui.drafts[id]) return;
+  if (!id) return;
+
+  // —— 未登记场次（复制 / 新建产生）：通过校验前绝不进入 doc，保存时才首次入档 ——
+  if (ui.pendingSession && ui.pendingSession.id === id) {
+    if (!draftSaveable(id)) {
+      toast("副本仍有阻断项或冲突，无法保存；解决前不会写入本机存档，右侧核对栏可逐项定位", "error");
+      return;
+    }
+    const data = JSON.parse(JSON.stringify(ui.pendingSession));
+    const label = ui.pendingKind === "duplicate"
+      ? `复制场次「${ui.pendingSourceName}」`
+      : `新建场次「${data.name}」`;
+    ui.pendingSession = null;
+    ui.pendingKind = null;
+    ui.pendingSourceName = null;
+    commit(label, () => {
+      doc.sessions.push(data);
+      doc.selectedSessionId = id;
+    });
+    renderAll();
+    toast(`场次「${data.name}」已保存并写入本机存档`, "ok");
+    return;
+  }
+
+  // —— 已登记场次的草稿修改 ——
+  if (!ui.drafts[id]) return;
   if (!draftSaveable(id)) {
     toast("仍有阻断项或冲突，无法保存；右侧核对栏可逐项定位", "error");
     return;
@@ -916,9 +991,22 @@ function saveDraft() {
   toast(`场次「${draft.name}」已保存`, "ok");
 }
 
+/** 放弃当前编辑：未登记场次直接丢弃（不留副本、不入存档、不进撤销栈）；已登记场次还原到上次保存版本 */
 function revertDraft() {
   const id = ui.activeSessionId;
-  if (!id || !ui.drafts[id]) return;
+  if (!id) return;
+  if (ui.pendingSession && ui.pendingSession.id === id) {
+    ui.pendingSession = null;
+    ui.pendingKind = null;
+    ui.pendingSourceName = null;
+    ui.activeSessionId = doc.selectedSessionId && sessionById(doc.selectedSessionId)
+      ? doc.selectedSessionId
+      : doc.sessions.at(-1)?.id ?? null;
+    renderAll();
+    toast("已放弃未保存的场次，副本未写入存档");
+    return;
+  }
+  if (!ui.drafts[id]) return;
   delete ui.drafts[id];
   renderAll();
   toast("已还原到上次保存的版本");
@@ -928,42 +1016,52 @@ function revertDraft() {
  * 场次：新建 / 复制 / 删除 / 切换
  * ============================================================ */
 
-function createSession(opts = {}) {
-  const id = uid();
-  const session = {
-    id,
-    name: opts.name || "新场次",
-    date: opts.date || new Date().toISOString().slice(0, 10),
-    startTime: opts.startTime || "10:00",
-    roomId: opts.roomId || doc.rooms[0]?.id || null,
-    gap: opts.gap ?? doc.settings.defaultGap,
-    entries: opts.entries || []
-  };
-  commit(opts.commitLabel || "新建场次", () => {
-    doc.sessions.push(session);
-    doc.selectedSessionId = id;
-  });
-  ui.activeSessionId = id;
-  // 新建后立即进入草稿，方便改名改时间
-  ui.drafts[id] = JSON.parse(JSON.stringify(session));
+/** 生成一个“未登记场次”作为 pending：仅存在于内存，保存前不进入 doc、不写 localStorage */
+function openPending(session, kind, sourceName = null) {
+  // 同时只允许一个未登记场次
+  if (ui.pendingSession) {
+    toast("请先保存或放弃当前未保存的场次", "error");
+    return null;
+  }
+  ui.pendingSession = session;
+  ui.pendingKind = kind;
+  ui.pendingSourceName = sourceName;
+  ui.activeSessionId = session.id;
   renderAll();
-  return id;
+  return session;
+}
+
+function createSession() {
+  if (ui.pendingSession) { toast("请先保存或放弃当前未保存的场次", "error"); return; }
+  const id = uid();
+  openPending({
+    id,
+    name: "新场次",
+    date: new Date().toISOString().slice(0, 10),
+    startTime: "10:00",
+    roomId: doc.rooms[0]?.id || null,
+    gap: doc.settings.defaultGap,
+    entries: []
+  }, "new");
 }
 
 function duplicateCurrentSession() {
+  if (ui.pendingSession) { toast("请先保存或放弃当前未保存的场次", "error"); return; }
+  // 来源必须是已保存的正式场次
   const src = sessionById(ui.activeSessionId);
   if (!src) return;
-  // 复制到同厅，开始时间顺延 30 分钟，条目深拷贝、重新生成 entry id
+  // 复制到同厅，开始时间顺延 30 分钟，条目深拷贝、重新生成 entry id、保留替代片段选择
   const startMin = parseTime(src.startTime);
   let newTime = src.startTime;
   let date = src.date;
   if (Number.isFinite(startMin)) {
     const day = parseDate(src.date);
     const abs = day * 1440 + startMin + 30;
-    date = new Date( Math.floor(abs / 1440) * 86400000).toISOString().slice(0, 10);
+    date = new Date(Math.floor(abs / 1440) * 86400000).toISOString().slice(0, 10);
     newTime = fmtClock(abs % 1440);
   }
-  const copy = {
+  const pending = {
+    id: uid(),
     name: src.name + " 副本",
     date,
     startTime: newTime,
@@ -971,18 +1069,19 @@ function duplicateCurrentSession() {
     gap: src.gap,
     entries: src.entries.map((e) => ({ id: uid(), clipId: e.clipId, altClipId: e.altClipId }))
   };
-  const id = uid();
-  commit(`复制场次「${src.name}」`, () => {
-    doc.sessions.push({ id, ...copy });
-    doc.selectedSessionId = id;
-  });
-  ui.activeSessionId = id;
-  renderAll();
-  toast(`已复制为「${copy.name}」（${date} ${newTime}），仍可继续编辑`, "ok");
+  openPending(pending, "duplicate", src.name);
+  if (ui.pendingSession) {
+    toast(`已复制为「${pending.name}」（${date} ${newTime}），保存前不会写入存档`, "ok");
+  }
 }
 
 function removeCurrentSession() {
   const id = ui.activeSessionId;
+  // 未登记场次：直接丢弃，无需确认、不进撤销栈
+  if (ui.pendingSession && ui.pendingSession.id === id) {
+    revertDraft();
+    return;
+  }
   const s = sessionById(id);
   if (!s) return;
   if (!window.confirm(`确认移除场次「${s.name}」？该操作可撤销。`)) return;
@@ -999,14 +1098,23 @@ function removeCurrentSession() {
 function switchSession(id) {
   if (id === ui.activeSessionId) return;
   const currentId = ui.activeSessionId;
-  if (currentId && ui.drafts[currentId]) {
+  // 当前停留在未保存的未登记场次：切换即放弃它（它从未进入存档）
+  if (ui.pendingSession && ui.pendingSession.id === currentId) {
+    const keep = window.confirm("当前复制/新建的场次尚未保存。\n确定＝放弃它并切换（不会写入存档）；取消＝留在本场次。");
+    if (!keep) return;
+    ui.pendingSession = null;
+    ui.pendingKind = null;
+    ui.pendingSourceName = null;
+  } else if (currentId && ui.drafts[currentId]) {
     const keep = window.confirm("当前场次有未保存修改。\n确定＝放弃修改并切换；取消＝留在本场次。");
     if (!keep) return;
     delete ui.drafts[currentId];
   }
   ui.activeSessionId = id;
-  doc.selectedSessionId = id;
-  persist(); // 选择状态不进入撤销栈
+  if (sessionById(id)) {
+    doc.selectedSessionId = id;
+    persist(); // 选择状态不进入撤销栈
+  }
   renderAll();
 }
 
@@ -1384,7 +1492,7 @@ els.resetDataBtn.addEventListener("click", () => {
   localStorage.removeItem(HIST_KEY);
   doc = makeSeed();
   history = { past: [], future: [] };
-  ui = { libTab: "clips", activeSessionId: doc.selectedSessionId, drafts: {}, clipSearch: "", editingClipId: null };
+  ui = { libTab: "clips", activeSessionId: doc.selectedSessionId, pendingSession: null, drafts: {}, clipSearch: "", editingClipId: null };
   persist();
   renderAll();
   toast("已恢复示例数据");
@@ -1401,14 +1509,16 @@ document.addEventListener("keydown", (e) => {
   else if (k === "s") { e.preventDefault(); saveDraft(); }
 });
 
-// 离开页面前提醒未保存草稿
+// 离开页面前提醒未保存草稿或未登记场次（未登记场次刷新即消失）
 window.addEventListener("beforeunload", (e) => {
-  if (Object.keys(ui.drafts).length) { e.preventDefault(); e.returnValue = ""; }
+  if (Object.keys(ui.drafts).length || ui.pendingSession) { e.preventDefault(); e.returnValue = ""; }
 });
 
 /* ---------------- 启动 ---------------- */
 
+const hadStoredDoc = !!localStorage.getItem(STORAGE_KEY);
 doc = loadDoc();
+if (!hadStoredDoc) persist(); // 首次打开：把内置示例作为正式数据落盘，保证刷新恢复
 ui.activeSessionId = doc.selectedSessionId && sessionById(doc.selectedSessionId)
   ? doc.selectedSessionId
   : doc.sessions[0]?.id ?? null;
